@@ -6,6 +6,8 @@ import logging
 
 import bluepy
 
+from enum import Enum
+
 DEFAULT_RETRY_COUNT = 3
 DEFAULT_RETRY_TIMEOUT = .2
 
@@ -30,6 +32,40 @@ BLE_NOTIFICATION_WAIT_TIME_SECONDS = 3.0
 
 _LOGGER = logging.getLogger(__name__)
 
+class ActionStatus(Enum):
+    complete = 1
+    device_busy = 3
+    device_wrong_mode = 5
+    device_unreachable = 11
+    device_encrypted  = 7
+    device_unencrypted = 8
+    wrong_password = 9
+
+    unable_resp = 254
+    unable_connect = 255
+
+    def msg(self): 
+        if self == ActionStatus.complete:
+            msg = "action complete"
+        elif self == ActionStatus.device_busy:
+            msg = "switchbot is busy"
+        elif self == ActionStatus.wrong_mode:
+            msg = "switchbot is unable to do this request"
+        elif self == ActionStatus.device_unreachable:
+            msg = "switchbot is unreachable"
+        elif self == ActionStatus.device_encrypted:
+            msg = "switchbot is encrypted"
+        elif self == ActionStatus.device_unencrypted:
+            msg = "switchbot is unencrypted"
+        elif self == ActionStatus.wrong_password:
+            msg = "switchbot password is wrong"
+        elif self == ActionStatus.unable_resp:
+            msg = "switchbot does not respond"
+        elif self == ActionStatus.unable_resp:
+            msg = "switchbot unable to connect"
+        else:
+            raise ValueError("unknown action status: " + str(self))
+        return msg
 
 class Switchbot:
     """Representation of a Switchbot."""
@@ -38,8 +74,11 @@ class Switchbot:
         self._mac = mac
         self._device = None
         self._retry_count = retry_count
-        self._lastBattRefresh = 0
+        self._last_batt_refresh = 0
         self._battery_percent = None
+        self._cmd_response = False
+        self._cmd_complete = False
+        self._cmd_status = None
         if password is None or password == "":
             self._password_encoded = None
         else:
@@ -95,43 +134,60 @@ class Switchbot:
         return write_result
 
     def _sendcommand(self, key, retry, action=True) -> bool:
-        send_success = False
+        exception = False
         command = self._commandkey(key, action)
         _LOGGER.debug("Sending command to switchbot %s", command)
         try:
             self._connect()
+
+            self._cmd_response = False
+            self._cmd_complete = False
+            self._cmd_status = None
             if (action):
-                send_success = self._writekey(command)
+                self._doAction(command)
             else:
-                self._getBatteryPercent_FWVersion(command)
+                self._getInfo(command)
              
         except bluepy.btle.BTLEException:
+            exception = True
             _LOGGER.warning("Error talking to Switchbot.", exc_info=True)
         finally:
             self._disconnect()
-        if send_success:
+        if self._cmd_complete:
             return True
-        if retry < 1:
-            _LOGGER.error("Switchbot communication failed. Stopping trying.", exc_info=True)
+        if retry < 0:
+            if exception == False:
+                if self._cmd_response:
+                    _LOGGER.error("Switchbot communication failed. status: %s", self._cmd_status)
+                else:
+                    _LOGGER.error("Switchbot communication failed. no response")
             return False
-        _LOGGER.warning("Cannot connect to Switchbot. Retrying (remaining: %d)...", retry)
-        time.sleep(DEFAULT_RETRY_TIMEOUT)
-        return self._sendcommand(key, retry - 1, action)
+        if retry - 1 >= 0:
+            _LOGGER.warning("Cannot connect to Switchbot. Retrying (remaining: %d)...", retry)
+            time.sleep(DEFAULT_RETRY_TIMEOUT)
+            return self._sendcommand(key, retry - 1, action)
+        return self._cmd_complete
 
-    def _getBatteryPercent_FWVersion(self, command):
+    def _doAction(self, command) -> None:
+        self._device.setDelegate(ActionNotificationDelegate(self))
+        handler = bluepy.btle.Characteristic(self._device, "0014", 20, None, 20)
+        handler.write(binascii.a2b_hex("0100"))
+        self._writekey(command)
+        self._device.waitForNotifications(BLE_NOTIFICATION_WAIT_TIME_SECONDS)
+        time.sleep(1)
+
+    def _getInfo(self, command) -> None:
         now = time.time()
-        """if self._lastBattRefresh + BATTERY_CHECK_TIMEOUT_SECONDS >= now:"""
-        """return"""
-        self._device.setDelegate(SwitchBotSettingsNotificationDelegate(self))
+        #if self._lastBattRefresh + BATTERY_CHECK_TIMEOUT_SECONDS >= now:
+        #    return
+        self._device.setDelegate(InfoNotificationDelegate(self))
         handler = bluepy.btle.Characteristic(self._device, "0014", 20, None, 20)
         handler.write(binascii.a2b_hex("0100"))
         self._writekey(command)
 
         if self._device.waitForNotifications(BLE_NOTIFICATION_WAIT_TIME_SECONDS):
-            _LOGGER.info("Switchbot got batt notification!")
-            self._lastBattRefresh = time.time()
+            self._last_batt_refresh = time.time()
         time.sleep(1)
-        _LOGGER.info("DONE Waiting...")
 
     def turn_on(self) -> bool:
         """Turn device on."""
@@ -149,18 +205,42 @@ class Switchbot:
         """Get Switchbot settings."""
         self._sendcommand(INFO_GET, self._retry_count, False)
 
-class SwitchBotSettingsNotificationDelegate(bluepy.btle.DefaultDelegate):
+class ActionNotificationDelegate(bluepy.btle.DefaultDelegate):
     def __init__(self, params):
         bluepy.btle.DefaultDelegate.__init__(self)
         _LOGGER.info("Setup switchbot delegate: %s", params)
         self._driver = params
 
     def handleNotification(self, cHandle, data):
-        _LOGGER.info("********* Switchbot notification ************* - [Handle: %s] Data: %s", cHandle, data )
+        self._cmd_response = True
         _LOGGER.info("********* Switchbot notification ************* - [Handle: %s] Data: %s", cHandle, data.hex() )
-        batt = data[1] #int.from_bytes(data[1], byteorder='big')
-        firmware_version = data[2] / 10.0
-        _LOGGER.debug("Got SwitchBot battery: %d FW Version: %f", batt, firmware_version)
-        self._driver._battery_percent = batt
+        action_status = ActionStatus(data[0])
+
+        if action_status is not ActionStatus.complete:
+            self._cmd_complete = False
+            self._cmd_status = action_status.msg()
+        else:
+            self._cmd_complete = True
+
+class InfoNotificationDelegate(bluepy.btle.DefaultDelegate):
+    def __init__(self, params):
+        bluepy.btle.DefaultDelegate.__init__(self)
+        _LOGGER.info("Setup switchbot delegate: %s", params)
+        self._driver = params
+
+    def handleNotification(self, cHandle, data):
+        self._cmd_response = True
+        _LOGGER.info("********* Switchbot notification ************* - [Handle: %s] Data: %s", cHandle, data.hex() )
+        action_status = ActionStatus(data[0])
+
+        if action_status is not ActionStatus.complete:
+            self._cmd_complete = False
+            self._cmd_status = action_status.msg()
+        else:
+            self._cmd_complete = True
+            batt = data[1]
+            firmware_version = data[2] / 10.0
+            self._driver._battery_percent = batt
+            _LOGGER.debug("Got SwitchBot battery: %d FW Version: %f", batt, firmware_version)
 
 
