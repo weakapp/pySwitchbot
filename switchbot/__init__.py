@@ -150,8 +150,7 @@ class Switchbot:
              
         except bluepy.btle.BTLEException:
             exception = True
-            if retry < 0: 
-                _LOGGER.warning("Error talking to Switchbot.", exc_info=True)
+            _LOGGER.warning("Error talking to Switchbot.", exc_info=True)
         finally:
             self._disconnect()
         if self._cmd_complete:
