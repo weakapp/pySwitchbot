@@ -135,14 +135,15 @@ class Switchbot:
     def _sendcommand(self, key, retry, action=True) -> bool:
         retry = retry - 1
         exception = False
+        self._cmd_response = False
+        self._cmd_complete = False
+        self._cmd_status = None
+
         command = self._commandkey(key, action)
         _LOGGER.debug("Sending command to switchbot %s", command)
         try:
             self._connect()
 
-            self._cmd_response = False
-            self._cmd_complete = False
-            self._cmd_status = None
             if (action):
                 self._doAction(command)
             else:
