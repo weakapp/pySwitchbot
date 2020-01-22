@@ -49,7 +49,7 @@ class ActionStatus(Enum):
             msg = "action complete"
         elif self == ActionStatus.device_busy:
             msg = "switchbot is busy"
-        elif self == ActionStatus.wrong_mode:
+        elif self == ActionStatus.device_wrong_mode:
             msg = "switchbot is unable to do this request"
         elif self == ActionStatus.device_unreachable:
             msg = "switchbot is unreachable"
@@ -61,7 +61,7 @@ class ActionStatus(Enum):
             msg = "switchbot password is wrong"
         elif self == ActionStatus.unable_resp:
             msg = "switchbot does not respond"
-        elif self == ActionStatus.unable_resp:
+        elif self == ActionStatus.unable_connect:
             msg = "switchbot unable to connect"
         else:
             raise ValueError("unknown action status: " + str(self))
@@ -134,6 +134,7 @@ class Switchbot:
         return write_result
 
     def _sendcommand(self, key, retry, action=True) -> bool:
+        retry = retry - 1
         exception = False
         command = self._commandkey(key, action)
         _LOGGER.debug("Sending command to switchbot %s", command)
@@ -150,22 +151,22 @@ class Switchbot:
              
         except bluepy.btle.BTLEException:
             exception = True
-            _LOGGER.warning("Error talking to Switchbot.", exc_info=True)
+            if retry < 0: 
+                _LOGGER.warning("Error talking to Switchbot.", exc_info=True)
         finally:
             self._disconnect()
         if self._cmd_complete:
             return True
-        if retry < 0:
+        if retry >= 0:
+            time.sleep(DEFAULT_RETRY_TIMEOUT)
+            return self._sendcommand(key, retry, action)
+        else:
             if exception == False:
+                _LOGGER.error("Switchbot communication failed. status: %s", self._cmd_status)
                 if self._cmd_response:
                     _LOGGER.error("Switchbot communication failed. status: %s", self._cmd_status)
                 else:
                     _LOGGER.error("Switchbot communication failed. no response")
-            return False
-        if retry - 1 >= 0:
-            _LOGGER.warning("Cannot connect to Switchbot. Retrying (remaining: %d)...", retry)
-            time.sleep(DEFAULT_RETRY_TIMEOUT)
-            return self._sendcommand(key, retry - 1, action)
         return self._cmd_complete
 
     def _doAction(self, command) -> None:
@@ -212,15 +213,15 @@ class ActionNotificationDelegate(bluepy.btle.DefaultDelegate):
         self._driver = params
 
     def handleNotification(self, cHandle, data):
-        self._cmd_response = True
-        _LOGGER.info("********* Switchbot notification ************* - [Handle: %s] Data: %s", cHandle, data.hex() )
+        self._driver._cmd_response = True
+        _LOGGER.debug("********* Switchbot notification ************* - [Handle: %s] Data: %s", cHandle, data.hex() )
         action_status = ActionStatus(data[0])
 
         if action_status is not ActionStatus.complete:
-            self._cmd_complete = False
-            self._cmd_status = action_status.msg()
+            self._driver._cmd_complete = False
+            self._driver._cmd_status = action_status.msg()
         else:
-            self._cmd_complete = True
+            self._driver._cmd_complete = True
 
 class InfoNotificationDelegate(bluepy.btle.DefaultDelegate):
     def __init__(self, params):
@@ -229,15 +230,15 @@ class InfoNotificationDelegate(bluepy.btle.DefaultDelegate):
         self._driver = params
 
     def handleNotification(self, cHandle, data):
-        self._cmd_response = True
+        self._driver._cmd_response = True
         _LOGGER.info("********* Switchbot notification ************* - [Handle: %s] Data: %s", cHandle, data.hex() )
         action_status = ActionStatus(data[0])
 
         if action_status is not ActionStatus.complete:
-            self._cmd_complete = False
-            self._cmd_status = action_status.msg()
+            self._driver._cmd_complete = False
+            self._driver._cmd_status = action_status.msg()
         else:
-            self._cmd_complete = True
+            self._driver._cmd_complete = True
             batt = data[1]
             firmware_version = data[2] / 10.0
             self._driver._battery_percent = batt
