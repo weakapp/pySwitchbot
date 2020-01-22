@@ -93,7 +93,6 @@ class Switchbot:
                                                   bluepy.btle.ADDR_TYPE_RANDOM)
             _LOGGER.debug("Connected to Switchbot.")
         except bluepy.btle.BTLEException:
-            _LOGGER.debug("Failed connecting to Switchbot.", exc_info=True)
             self._device = None
             raise
 
