@@ -15,11 +15,17 @@ UUID = "cba20d00-224d-11e6-9fb8-0002a5d5c51b"
 HANDLE = "cba20002-224d-11e6-9fb8-0002a5d5c51b"
 INFO_HANDLE = "cba20003-224d-11e6-9fb8-0002a5d5c51b"
 
+CMD_ACTION = 1
+CMD_MODE = 2
+CMD_INFO = 3
+
 ACTION_PREFIX = "5701"
 INFO_PREFIX = "5702"
+MODE_PREFIX = "570364"
 
 ACTION_PWD_PREFIX = "5711"
 INFO_PWD_PREFIX = "5712"
+MODE_PWD_PREFIX = "571364"
 
 ACTION_PRESS = ""
 ACTION_ON = "01"
@@ -27,10 +33,14 @@ ACTION_OFF = "02"
 
 INFO_GET = ""
 
+MODE_VALUES = {True, False}
+
 BATTERY_CHECK_TIMEOUT_SECONDS = 3600.0  # only get batt at most every 60 mins
 BLE_NOTIFICATION_WAIT_TIME_SECONDS = 3.0
 
+logging.basicConfig()
 _LOGGER = logging.getLogger(__name__)
+_LOGGER.setLevel(logging.DEBUG)
 
 class ActionStatus(Enum):
     complete = 1
@@ -50,7 +60,7 @@ class ActionStatus(Enum):
         elif self == ActionStatus.device_busy:
             msg = "switchbot is busy"
         elif self == ActionStatus.device_wrong_mode:
-            msg = "switchbot is unable to do this request"
+            msg = "switchbot mode is wrong"
         elif self == ActionStatus.device_unreachable:
             msg = "switchbot is unreachable"
         elif self == ActionStatus.device_encrypted:
@@ -70,9 +80,10 @@ class ActionStatus(Enum):
 class Switchbot:
     """Representation of a Switchbot."""
 
-    def __init__(self, mac, retry_count=DEFAULT_RETRY_COUNT, password=None) -> None:
+    def __init__(self, mac, dual, retry_count=DEFAULT_RETRY_COUNT, password=None) -> None:
         self._mac = mac
         self._device = None
+        self._dual = dual
         self._retry_count = retry_count
         self._last_batt_refresh = 0
         self._battery_percent = None
@@ -83,6 +94,9 @@ class Switchbot:
             self._password_encoded = None
         else:
             self._password_encoded = '%x' % (binascii.crc32(password.encode('ascii')) & 0xffffffff)
+
+        if dual not in MODE_VALUES:
+            raise ValueError("dual must be one of %r." % MODE_VALUES)
 
     def _connect(self) -> None:
         if self._device is not None:
@@ -107,19 +121,29 @@ class Switchbot:
         finally:
             self._device = None
 
-    def _commandkey(self, key, action=True) -> str:
+    def _actionKey(self, key) -> str:
         if self._password_encoded is None:
-            if (action):
-                return ACTION_PREFIX + key
-            else:
-                return INFO_PREFIX + key
-
-        if (action):
-            return ACTION_PWD_PREFIX + self._password_encoded + key
-        else:
-            return INFO_PWD_PREFIX + self._password_encoded + key
+            return ACTION_PREFIX + key
+        return ACTION_PWD_PREFIX + self._password_encoded + key
         
-    def _writekey(self, key) -> bool:
+    def _modeKey(self, dual, inverse) -> str:
+        if self._password_encoded is None:
+            if dual:
+                return MODE_PREFIX + "1" + ("1" if inverse else "0")
+            else:
+                return MODE_PREFIX + "00" 
+
+        if dual:
+            return MODE_PWD_PREFIX + "1" + ("1" if inverse else "0")
+        else:
+            return MODE_PWD_PREFIX + "00" 
+
+    def _infoKey(self, key) -> str:
+        if self._password_encoded is None:
+            return INFO_PREFIX + key
+        return INFO_PWD_PREFIX + self._password_encoded + key
+
+    def _writeKey(self, key) -> bool:
         _LOGGER.debug("Prepare to send")
         hand_service = self._device.getServiceByUUID(UUID)
         hand = hand_service.getCharacteristics(HANDLE)[0]
@@ -132,23 +156,28 @@ class Switchbot:
             _LOGGER.info("Successfully sent command to Switchbot (MAC: %s).", self._mac)
         return write_result
 
-    def _sendcommand(self, key, retry, action=True) -> bool:
+    def _sendCommand(self, cmd, retry, key=None, dual=None, inverse=None) -> bool:
         retry = retry - 1
         exception = False
         self._cmd_response = False
         self._cmd_complete = False
         self._cmd_status = None
 
-        command = self._commandkey(key, action)
-        _LOGGER.debug("Sending command to switchbot %s", command)
+        if cmd == CMD_ACTION:
+            command = self._actionKey(key)
+        elif cmd == CMD_MODE:
+            command = self._modeKey(dual, inverse)
+        elif cmd == CMD_INFO:
+            command = self._infoKey(key)
+
         try:
             self._connect()
 
-            if (action):
-                self._doAction(command)
-            else:
+            if cmd == CMD_INFO:
                 self._getInfo(command)
-             
+            else:
+                self._doActionOrMode(command)
+
         except bluepy.btle.BTLEException:
             exception = True
             _LOGGER.warning("Error talking to Switchbot.", exc_info=True)
@@ -156,23 +185,25 @@ class Switchbot:
             self._disconnect()
         if self._cmd_complete:
             return True
+        if self._cmd_status is ActionStatus.device_wrong_mode:
+            _LOGGER.error("%s", self._cmd_status.msg())
+            return True
         if retry >= 0:
             time.sleep(DEFAULT_RETRY_TIMEOUT)
-            return self._sendcommand(key, retry, action)
+            return self._sendCommand(cmd, retry, key, dual, inverse)
         else:
             if exception == False:
-                _LOGGER.error("Switchbot communication failed. status: %s", self._cmd_status)
                 if self._cmd_response:
-                    _LOGGER.error("Switchbot communication failed. status: %s", self._cmd_status)
+                    _LOGGER.error("Switchbot communication failed. status: %s", self._cmd_status.msg())
                 else:
                     _LOGGER.error("Switchbot communication failed. no response")
         return self._cmd_complete
 
-    def _doAction(self, command) -> None:
-        self._device.setDelegate(ActionNotificationDelegate(self))
+    def _doActionOrMode(self, command) -> None:
+        self._device.setDelegate(ActionOrModeNotificationDelegate(self))
         handler = bluepy.btle.Characteristic(self._device, "0014", 20, None, 20)
         handler.write(binascii.a2b_hex("0100"))
-        self._writekey(command)
+        self._writeKey(command)
         self._device.waitForNotifications(BLE_NOTIFICATION_WAIT_TIME_SECONDS)
         time.sleep(1)
 
@@ -183,7 +214,7 @@ class Switchbot:
         self._device.setDelegate(InfoNotificationDelegate(self))
         handler = bluepy.btle.Characteristic(self._device, "0014", 20, None, 20)
         handler.write(binascii.a2b_hex("0100"))
-        self._writekey(command)
+        self._writeKey(command)
 
         if self._device.waitForNotifications(BLE_NOTIFICATION_WAIT_TIME_SECONDS):
             self._last_batt_refresh = time.time()
@@ -191,21 +222,36 @@ class Switchbot:
 
     def turn_on(self) -> bool:
         """Turn device on."""
-        return self._sendcommand(ACTION_ON, self._retry_count)
+        if not self._dual:
+            _LOGGER.error("Turn off is not supported in non-dual mode.")
+            return False
+        return self._sendCommand(CMD_ACTION, self._retry_count, key=ACTION_ON)
 
     def turn_off(self) -> bool:
         """Turn device off."""
-        return self._sendcommand(ACTION_OFF, self._retry_count)
+        if not self._dual:
+            _LOGGER.error("Turn off is not supporeted in non-dual mode.")
+            return False
+        return self._sendCommand(CMD_ACTION, self._retry_count, key=ACTION_OFF)
 
     def press(self) -> bool:
         """Press command to device."""
-        return self._sendcommand(ACTION_PRESS, self._retry_count)
+        if self._dual:
+            _LOGGER.error("Press is not supporeted in dual mode.")
+            return False
+        return self._sendCommand(CMD_ACTION, self._retry_count, key=ACTION_PRESS)
     
-    def getSettings(self) -> None:
+    def set_mode(self, dual, inverse=False) -> bool:
+        """Set Switchbot mode."""
+        if dual not in MODE_VALUES or inverse not in MODE_VALUES:
+            raise ValueError("dual or inverse must be one of %r." % MODE_VALUES)
+        return self._sendCommand(CMD_MODE, self._retry_count, dual=dual, inverse=inverse)
+    
+    def get_settings(self) -> None:
         """Get Switchbot settings."""
-        self._sendcommand(INFO_GET, self._retry_count, False)
+        self._sendCommand(CMD_INFO, self._retry_count, key=INFO_GET)
 
-class ActionNotificationDelegate(bluepy.btle.DefaultDelegate):
+class ActionOrModeNotificationDelegate(bluepy.btle.DefaultDelegate):
     def __init__(self, params):
         bluepy.btle.DefaultDelegate.__init__(self)
         _LOGGER.info("Setup switchbot delegate: %s", params)
@@ -213,12 +259,19 @@ class ActionNotificationDelegate(bluepy.btle.DefaultDelegate):
 
     def handleNotification(self, cHandle, data):
         self._driver._cmd_response = True
-        _LOGGER.debug("********* Switchbot notification ************* - [Handle: %s] Data: %s", cHandle, data.hex() )
+        _LOGGER.info("********* Switchbot notification ************* - [Handle: %s] Data: %s", cHandle, data.hex() )
         action_status = ActionStatus(data[0])
 
         if action_status is not ActionStatus.complete:
-            self._driver._cmd_complete = False
-            self._driver._cmd_status = action_status.msg()
+            if action_status is ActionStatus.device_wrong_mode:
+                if data[1] == int("0xff", 0):
+                    self._driver._cmd_complete = True 
+                else:
+                    self._driver._cmd_complete = False
+                    self._driver._cmd_status = action_status
+            else:
+                self._driver._cmd_complete = False
+                self._driver._cmd_status = action_status
         else:
             self._driver._cmd_complete = True
 
@@ -235,7 +288,7 @@ class InfoNotificationDelegate(bluepy.btle.DefaultDelegate):
 
         if action_status is not ActionStatus.complete:
             self._driver._cmd_complete = False
-            self._driver._cmd_status = action_status.msg()
+            self._driver._cmd_status = action_status
         else:
             self._driver._cmd_complete = True
             batt = data[1]
