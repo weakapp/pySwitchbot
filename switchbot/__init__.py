@@ -82,6 +82,7 @@ class Switchbot:
         self._mac = mac
         self._device = None
         self._dual_mode = dual_mode
+        self._inverse_mode = False
         self._retry_count = retry_count
         self._last_batt_refresh = 0
         self._battery_percent = None
@@ -241,10 +242,18 @@ class Switchbot:
         if dual_mode not in MODE_VALUES or inverse not in MODE_VALUES:
             raise ValueError("dual mode or inverse must be one of %r." % MODE_VALUES)
         return self._sendCommand(CMD_MODE, self._retry_count, dual_mode=dual_mode, inverse=inverse)
-    
-    def get_settings(self) -> None:
+
+    def get_settings(self) -> bool:
         """Get Switchbot settings."""
-        self._sendCommand(CMD_INFO, self._retry_count, key=INFO_GET)
+        return self._sendCommand(CMD_INFO, self._retry_count, key=INFO_GET)
+
+    def is_dual_mode(self) -> bool:
+        """Get Switchbot mode."""
+        return self._dual_mode
+    
+    def get_battery(self) -> int:
+        """Get Switchbot battery."""
+        return self._battery_percent
 
 class ActionOrModeNotificationDelegate(bluepy.btle.DefaultDelegate):
     def __init__(self, params):
@@ -287,8 +296,13 @@ class InfoNotificationDelegate(bluepy.btle.DefaultDelegate):
         else:
             self._driver._cmd_complete = True
             batt = data[1]
+            dual_mode = bool(data[9] & 16)
+            inverse_mode = bool(data[9] & 1)
             firmware_version = data[2] / 10.0
             self._driver._battery_percent = batt
-            _LOGGER.debug("Got SwitchBot battery: %d FW Version: %f", batt, firmware_version)
+            self._driver._dual_mode = dual_mode
+            self._driver._inverse_mode = inverse_mode
+            _LOGGER.debug("Got SwitchBot battery: %d FW Version: %f Mode: %s", 
+                batt, firmware_version, "switch" if dual_mode else "toggle")
 
 
