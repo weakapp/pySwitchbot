@@ -38,9 +38,7 @@ MODE_VALUES = {True, False}
 BATTERY_CHECK_TIMEOUT_SECONDS = 3600.0  # only get batt at most every 60 mins
 BLE_NOTIFICATION_WAIT_TIME_SECONDS = 3.0
 
-logging.basicConfig()
 _LOGGER = logging.getLogger(__name__)
-_LOGGER.setLevel(logging.DEBUG)
 
 class ActionStatus(Enum):
     complete = 1
@@ -80,10 +78,10 @@ class ActionStatus(Enum):
 class Switchbot:
     """Representation of a Switchbot."""
 
-    def __init__(self, mac, dual, retry_count=DEFAULT_RETRY_COUNT, password=None) -> None:
+    def __init__(self, mac, dual_mode, retry_count=DEFAULT_RETRY_COUNT, password=None) -> None:
         self._mac = mac
         self._device = None
-        self._dual = dual
+        self._dual_mode = dual_mode
         self._retry_count = retry_count
         self._last_batt_refresh = 0
         self._battery_percent = None
@@ -95,8 +93,8 @@ class Switchbot:
         else:
             self._password_encoded = '%x' % (binascii.crc32(password.encode('ascii')) & 0xffffffff)
 
-        if dual not in MODE_VALUES:
-            raise ValueError("dual must be one of %r." % MODE_VALUES)
+        if dual_mode not in MODE_VALUES:
+            raise ValueError("dual mode must be one of %r." % MODE_VALUES)
 
     def _connect(self) -> None:
         if self._device is not None:
@@ -126,14 +124,14 @@ class Switchbot:
             return ACTION_PREFIX + key
         return ACTION_PWD_PREFIX + self._password_encoded + key
         
-    def _modeKey(self, dual, inverse) -> str:
+    def _modeKey(self, dual_mode, inverse) -> str:
         if self._password_encoded is None:
-            if dual:
+            if dual_mode:
                 return MODE_PREFIX + "1" + ("1" if inverse else "0")
             else:
                 return MODE_PREFIX + "00" 
 
-        if dual:
+        if dual_mode:
             return MODE_PWD_PREFIX + "1" + ("1" if inverse else "0")
         else:
             return MODE_PWD_PREFIX + "00" 
@@ -156,7 +154,7 @@ class Switchbot:
             _LOGGER.info("Successfully sent command to Switchbot (MAC: %s).", self._mac)
         return write_result
 
-    def _sendCommand(self, cmd, retry, key=None, dual=None, inverse=None) -> bool:
+    def _sendCommand(self, cmd, retry, key=None, dual_mode=None, inverse=None) -> bool:
         retry = retry - 1
         exception = False
         self._cmd_response = False
@@ -166,7 +164,7 @@ class Switchbot:
         if cmd == CMD_ACTION:
             command = self._actionKey(key)
         elif cmd == CMD_MODE:
-            command = self._modeKey(dual, inverse)
+            command = self._modeKey(dual_mode, inverse)
         elif cmd == CMD_INFO:
             command = self._infoKey(key)
 
@@ -185,12 +183,9 @@ class Switchbot:
             self._disconnect()
         if self._cmd_complete:
             return True
-        if self._cmd_status is ActionStatus.device_wrong_mode:
-            _LOGGER.error("%s", self._cmd_status.msg())
-            return True
         if retry >= 0:
             time.sleep(DEFAULT_RETRY_TIMEOUT)
-            return self._sendCommand(cmd, retry, key, dual, inverse)
+            return self._sendCommand(cmd, retry, key, dual_mode, inverse)
         else:
             if exception == False:
                 if self._cmd_response:
@@ -222,30 +217,30 @@ class Switchbot:
 
     def turn_on(self) -> bool:
         """Turn device on."""
-        if not self._dual:
+        if not self._dual_mode:
             _LOGGER.error("Turn off is not supported in non-dual mode.")
             return False
         return self._sendCommand(CMD_ACTION, self._retry_count, key=ACTION_ON)
 
     def turn_off(self) -> bool:
         """Turn device off."""
-        if not self._dual:
+        if not self._dual_mode:
             _LOGGER.error("Turn off is not supporeted in non-dual mode.")
             return False
         return self._sendCommand(CMD_ACTION, self._retry_count, key=ACTION_OFF)
 
     def press(self) -> bool:
         """Press command to device."""
-        if self._dual:
+        if self._dual_mode:
             _LOGGER.error("Press is not supporeted in dual mode.")
             return False
         return self._sendCommand(CMD_ACTION, self._retry_count, key=ACTION_PRESS)
     
-    def set_mode(self, dual, inverse=False) -> bool:
+    def set_mode(self, dual_mode, inverse=False) -> bool:
         """Set Switchbot mode."""
-        if dual not in MODE_VALUES or inverse not in MODE_VALUES:
-            raise ValueError("dual or inverse must be one of %r." % MODE_VALUES)
-        return self._sendCommand(CMD_MODE, self._retry_count, dual=dual, inverse=inverse)
+        if dual_mode not in MODE_VALUES or inverse not in MODE_VALUES:
+            raise ValueError("dual mode or inverse must be one of %r." % MODE_VALUES)
+        return self._sendCommand(CMD_MODE, self._retry_count, dual_mode=dual_mode, inverse=inverse)
     
     def get_settings(self) -> None:
         """Get Switchbot settings."""
