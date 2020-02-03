@@ -179,7 +179,8 @@ class Switchbot:
 
         except bluepy.btle.BTLEException:
             exception = True
-            _LOGGER.warning("Error talking to Switchbot.", exc_info=True)
+            if retry < 0:
+                _LOGGER.warning("Error talking to Switchbot.", exc_info=True)
         finally:
             self._disconnect()
         if self._cmd_complete:
@@ -188,7 +189,7 @@ class Switchbot:
             time.sleep(DEFAULT_RETRY_TIMEOUT)
             return self._sendCommand(cmd, retry, key, dual_mode, inverse)
         else:
-            if exception == False:
+            if not exception:
                 if self._cmd_response:
                     _LOGGER.error("Switchbot communication failed. status: %s", self._cmd_status.msg())
                 else:
